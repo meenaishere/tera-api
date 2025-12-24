@@ -4,6 +4,14 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Create axios instance with longer timeout
+const client = axios.create({
+    timeout: 60000, // 60 seconds
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+});
+
 // CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
@@ -15,11 +23,18 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
     res.json({
         name: '🎬 TeraBox Downloader API',
+        status: 'online',
         endpoints: {
             '/api/get?url=': 'Get file info and download link'
         },
-        example: '/api/get?url=https://1024terabox.com/s/1xxxxx'
+        example: '/api/get?url=https://1024terabox.com/s/1xxxxx',
+        note: 'First request may take 30-60 seconds'
     });
+});
+
+// Health check
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
 // Main API
@@ -30,128 +45,162 @@ app.get('/api/get', async (req, res) => {
         return res.json({ success: false, error: 'URL parameter required' });
     }
 
-    console.log('Processing:', url);
+    console.log('📥 Processing:', url);
+    const startTime = Date.now();
 
     try {
         const result = await getTeraboxData(url);
+        console.log(`✅ Done in ${Date.now() - startTime}ms`);
         res.json(result);
     } catch (error) {
-        console.error('Error:', error.message);
+        console.error('❌ Error:', error.message);
         res.json({ success: false, error: error.message });
     }
 });
 
-// Alias endpoints
+// Alias
 app.get('/api/list', (req, res) => {
-    req.url = '/api/get' + req.url.slice(9);
-    app._router.handle(req, res);
+    const url = req.query.url;
+    if (!url) {
+        return res.json({ success: false, error: 'URL required' });
+    }
+    res.redirect(`/api/get?url=${encodeURIComponent(url)}`);
 });
 
 async function getTeraboxData(shareUrl) {
-    // Try multiple working APIs
-    const apis = [
-        tryApi1,
-        tryApi2,
-        tryApi3,
-        tryApi4,
-        tryDirectScrape
-    ];
+    const errors = [];
 
-    let lastError = 'All methods failed';
-
-    for (const api of apis) {
-        try {
-            const result = await api(shareUrl);
-            if (result && result.success) {
-                return result;
-            }
-        } catch (e) {
-            lastError = e.message;
-            continue;
-        }
+    // Method 1: Try NepCoder API
+    try {
+        console.log('Trying API 1...');
+        const result = await tryNepCoderApi(shareUrl);
+        if (result.success) return result;
+    } catch (e) {
+        errors.push('API1: ' + e.message);
     }
 
-    return { success: false, error: lastError };
+    // Method 2: Try Uday API
+    try {
+        console.log('Trying API 2...');
+        const result = await tryUdayApi(shareUrl);
+        if (result.success) return result;
+    } catch (e) {
+        errors.push('API2: ' + e.message);
+    }
+
+    // Method 3: Try direct TeraBox API
+    try {
+        console.log('Trying Direct API...');
+        const result = await tryDirectApi(shareUrl);
+        if (result.success) return result;
+    } catch (e) {
+        errors.push('Direct: ' + e.message);
+    }
+
+    // Method 4: Try page scraping
+    try {
+        console.log('Trying Scrape...');
+        const result = await tryPageScrape(shareUrl);
+        if (result.success) return result;
+    } catch (e) {
+        errors.push('Scrape: ' + e.message);
+    }
+
+    return {
+        success: false,
+        error: 'All methods failed',
+        details: errors
+    };
 }
 
-// API Method 1
-async function tryApi1(url) {
+// NepCoder API
+async function tryNepCoderApi(url) {
     const apiUrl = `https://teraboxvideodownloader.nepcoderdevs.workers.dev/api/get-info?data=${encodeURIComponent(url)}`;
-    const response = await axios.get(apiUrl, { timeout: 15000 });
+
+    const response = await client.get(apiUrl);
     const data = response.data;
 
-    if (data && (data.file_name || data.resolutions)) {
+    if (!data) throw new Error('Empty response');
+
+    if (data.file_name || data.resolutions || data.download_link) {
         return {
             success: true,
             data: {
-                filename: data.file_name,
-                size: data.size,
+                filename: data.file_name || 'Unknown',
+                size: data.size || data.sizebytes || 0,
+                sizeFormatted: formatSize(data.size || data.sizebytes),
+                thumb: data.thumb || null,
+                downloadUrl: data.download_link || data.dlink || null,
+                resolutions: data.resolutions || null,
+                fastDownload: data.resolutions?.['Fast Download'] || null,
+                hdVideo: data.resolutions?.['HD Video'] || null
+            },
+            source: 'nepcoderdevs'
+        };
+    }
+
+    throw new Error('Invalid response format');
+}
+
+// Uday API
+async function tryUdayApi(url) {
+    const apiUrl = `https://terabox.udayscriptsx.workers.dev/api/get-info?data=${encodeURIComponent(url)}`;
+
+    const response = await client.get(apiUrl);
+    const data = response.data;
+
+    if (!data) throw new Error('Empty response');
+
+    if (data.file_name || data.download_link) {
+        return {
+            success: true,
+            data: {
+                filename: data.file_name || 'Unknown',
+                size: data.size || 0,
                 sizeFormatted: formatSize(data.size),
-                thumb: data.thumb,
-                downloadUrl: data.download_link || data.dlink,
+                thumb: data.thumb || null,
+                downloadUrl: data.download_link || data.dlink || null,
                 resolutions: data.resolutions || null
             },
-            source: 'api1'
+            source: 'udayscripts'
         };
     }
-    throw new Error('No data from API 1');
+
+    throw new Error('Invalid response format');
 }
 
-// API Method 2
-async function tryApi2(url) {
-    const apiUrl = `https://terabox.udayscriptsx.workers.dev/api/get-info?data=${encodeURIComponent(url)}`;
-    const response = await axios.get(apiUrl, { timeout: 15000 });
-    const data = response.data;
-
-    if (data && (data.file_name || data.list)) {
-        return {
-            success: true,
-            data: formatApiResponse(data),
-            source: 'api2'
-        };
-    }
-    throw new Error('No data from API 2');
-}
-
-// API Method 3
-async function tryApi3(url) {
-    const apiUrl = `https://teraboxdownloader.nepcoderdevs.workers.dev/api/get-info?data=${encodeURIComponent(url)}`;
-    const response = await axios.get(apiUrl, { timeout: 15000 });
-    const data = response.data;
-
-    if (data && (data.file_name || data.download_link)) {
-        return {
-            success: true,
-            data: formatApiResponse(data),
-            source: 'api3'
-        };
-    }
-    throw new Error('No data from API 3');
-}
-
-// API Method 4
-async function tryApi4(url) {
+// Direct TeraBox API
+async function tryDirectApi(url) {
     const surl = extractSurl(url);
     const baseUrl = getBaseUrl(url);
 
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Referer': baseUrl
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': `${baseUrl}/s/${surl}`
     };
 
     // Get share info
-    const infoRes = await axios.get(`${baseUrl}/api/shorturlinfo?shorturl=${surl}&root=1`, { headers, timeout: 10000 });
+    const infoUrl = `${baseUrl}/api/shorturlinfo?shorturl=${surl}&root=1`;
+    const infoRes = await client.get(infoUrl, { headers });
 
     if (infoRes.data.errno !== 0) {
-        throw new Error('API Error: ' + infoRes.data.errno);
+        throw new Error('Share info error: ' + (infoRes.data.errmsg || infoRes.data.errno));
     }
 
+    const shareInfo = {
+        shareid: infoRes.data.shareid,
+        uk: infoRes.data.uk,
+        sign: infoRes.data.sign,
+        timestamp: infoRes.data.timestamp
+    };
+
     // Get file list
-    const listRes = await axios.get(`${baseUrl}/share/list?shorturl=${surl}&dir=/&root=1&page=1&num=100`, { headers, timeout: 10000 });
+    const listUrl = `${baseUrl}/share/list?shorturl=${surl}&dir=/&root=1&page=1&num=100`;
+    const listRes = await client.get(listUrl, { headers });
 
     if (listRes.data.errno !== 0) {
-        throw new Error('List Error: ' + listRes.data.errno);
+        throw new Error('File list error: ' + (listRes.data.errmsg || listRes.data.errno));
     }
 
     const files = (listRes.data.list || []).map(f => ({
@@ -160,99 +209,102 @@ async function tryApi4(url) {
         size: f.size,
         sizeFormatted: formatSize(f.size),
         isDir: f.isdir === 1,
-        dlink: f.dlink,
-        thumb: f.thumbs?.url3 || null
+        dlink: f.dlink || null,
+        thumb: f.thumbs?.url3 || f.thumbs?.url2 || null
     }));
+
+    if (files.length === 0) {
+        throw new Error('No files found');
+    }
 
     return {
         success: true,
         data: {
             files,
-            shareInfo: {
-                shareid: infoRes.data.shareid,
-                uk: infoRes.data.uk,
-                sign: infoRes.data.sign,
-                timestamp: infoRes.data.timestamp
-            }
+            shareInfo
         },
         source: 'direct'
     };
 }
 
-// Direct page scrape
-async function tryDirectScrape(url) {
-    const response = await axios.get(url, {
+// Page Scrape
+async function tryPageScrape(url) {
+    const response = await client.get(url, {
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml'
-        },
-        timeout: 15000
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
     });
 
     const html = response.data;
 
-    // Extract file data from HTML
+    if (html.includes('verify') || html.includes('验证')) {
+        throw new Error('Verification required');
+    }
+
+    // Try to extract file list
     const listMatch = html.match(/"list"\s*:\s*(\[[\s\S]*?\])(?=\s*[,}])/);
+
     if (listMatch) {
         try {
             const list = JSON.parse(listMatch[1]);
             const files = list.map(f => ({
                 fs_id: String(f.fs_id),
-                filename: f.server_filename,
-                size: f.size,
-                sizeFormatted: formatSize(f.size),
-                dlink: f.dlink,
-                thumb: f.thumbs?.url3 || null
-            }));
-
-            return {
-                success: true,
-                data: { files },
-                source: 'scrape'
-            };
-        } catch (e) {}
-    }
-
-    throw new Error('Could not parse page');
-}
-
-function formatApiResponse(data) {
-    if (data.file_name) {
-        return {
-            filename: data.file_name,
-            size: data.size || data.sizebytes,
-            sizeFormatted: formatSize(data.size || data.sizebytes),
-            thumb: data.thumb,
-            downloadUrl: data.download_link || data.dlink,
-            resolutions: data.resolutions || null
-        };
-    }
-
-    if (data.list) {
-        return {
-            files: data.list.map(f => ({
-                fs_id: String(f.fs_id),
                 filename: f.server_filename || f.filename,
                 size: f.size,
                 sizeFormatted: formatSize(f.size),
-                dlink: f.dlink,
+                dlink: f.dlink || null,
                 thumb: f.thumbs?.url3 || null
-            }))
+            }));
+
+            if (files.length > 0) {
+                return {
+                    success: true,
+                    data: { files },
+                    source: 'scrape'
+                };
+            }
+        } catch (e) {
+            throw new Error('Parse error');
+        }
+    }
+
+    // Try single file
+    const fnMatch = html.match(/"server_filename"\s*:\s*"([^"]+)"/);
+    const fsMatch = html.match(/"fs_id"\s*:\s*(\d+)/);
+    const sizeMatch = html.match(/"size"\s*:\s*(\d+)/);
+    const dlinkMatch = html.match(/"dlink"\s*:\s*"([^"]+)"/);
+
+    if (fnMatch && fsMatch) {
+        return {
+            success: true,
+            data: {
+                files: [{
+                    fs_id: fsMatch[1],
+                    filename: fnMatch[1].replace(/\\/g, ''),
+                    size: sizeMatch ? parseInt(sizeMatch[1]) : 0,
+                    sizeFormatted: sizeMatch ? formatSize(parseInt(sizeMatch[1])) : 'Unknown',
+                    dlink: dlinkMatch ? dlinkMatch[1].replace(/\\/g, '') : null
+                }]
+            },
+            source: 'scrape'
         };
     }
 
-    return data;
+    throw new Error('Could not extract data from page');
 }
 
 function extractSurl(url) {
-    const match = url.match(/\/s\/(1?[a-zA-Z0-9_-]+)/i);
+    const match = url.match(/\/s\/(1?[a-zA-Z0-9_-]+)/i) ||
+                  url.match(/surl=(1?[a-zA-Z0-9_-]+)/i);
     if (match) return match[1];
-    throw new Error('Invalid URL');
+    throw new Error('Invalid TeraBox URL');
 }
 
 function getBaseUrl(url) {
     if (url.includes('1024tera.com')) return 'https://www.1024tera.com';
     if (url.includes('1024terabox.com')) return 'https://www.1024terabox.com';
+    if (url.includes('4funbox.com')) return 'https://www.4funbox.com';
+    if (url.includes('teraboxapp.com')) return 'https://www.teraboxapp.com';
     return 'https://www.terabox.com';
 }
 
@@ -267,5 +319,12 @@ function formatSize(bytes) {
 }
 
 app.listen(PORT, () => {
-    console.log(`🚀 TeraBox API running on port ${PORT}`);
+    console.log(`
+🚀 TeraBox API running on port ${PORT}
+
+Endpoints:
+  GET /                     - API info
+  GET /api/get?url=<link>   - Get file info
+  GET /health               - Health check
+    `);
 });
